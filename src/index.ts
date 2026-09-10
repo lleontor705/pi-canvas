@@ -142,4 +142,14 @@ export default function piCanvasExtension(pi: ExtensionAPI) {
       };
     },
   });
+
+  // Session shutdown lifecycle hook (Pi Extension Lifecycle Standard)
+  if (pi.on) {
+    pi.on('session_shutdown', async () => {
+      if (serverInstance?.isRunning()) {
+        await serverInstance.stop();
+      }
+    });
+  }
 }
+
