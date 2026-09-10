@@ -1,0 +1,36 @@
+{
+  "name": "pi-canvas",
+  "version": "0.1.0",
+  "description": "Live web preview, UI mockup, and Mermaid canvas extension for Pi Coding Agent",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "keywords": [
+    "pi-package",
+    "pi-coding-agent",
+    "extension",
+    "canvas",
+    "preview",
+    "artifacts",
+    "mermaid",
+    "ui"
+  ],
+  "author": "Luis Leon <luisleon705@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lleontor705/pi-canvas.git"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
