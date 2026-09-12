@@ -1,6 +1,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { ExtensionAPI, ExtensionCommandContext } from './types.js';
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from './types.js';
 import { CanvasServer } from './server.js';
 
 let serverInstance: CanvasServer | null = null;
@@ -89,6 +93,7 @@ export default function piCanvasExtension(pi: ExtensionAPI) {
   // Tool: render_canvas
   pi.registerTool({
     name: 'render_canvas',
+    label: 'Render Canvas',
     description:
       'Render live visual artifacts, diagrams, UI mockups, HTML pages, or SVGs on the user’s Pi Canvas web preview.',
     parameters: {
@@ -113,8 +118,8 @@ export default function piCanvasExtension(pi: ExtensionAPI) {
         },
       },
       required: ['title', 'type', 'content'],
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    } as any,
+    execute: async (_toolCallId, params: any, _signal, _onUpdate, ctx: ExtensionContext) => {
       const server = getOrCreateServer();
       const url = await server.start();
 
@@ -139,6 +144,11 @@ export default function piCanvasExtension(pi: ExtensionAPI) {
             text: `Successfully rendered artifact "${item.title}" (${item.type}) on Pi Canvas at ${url}`,
           },
         ],
+        details: {
+          title: item.title,
+          type: item.type,
+          url,
+        },
       };
     },
   });
@@ -152,4 +162,3 @@ export default function piCanvasExtension(pi: ExtensionAPI) {
     });
   }
 }
-

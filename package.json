@@ -1,14 +1,14 @@
 {
   "name": "pi-canvas",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Live web preview, UI mockup, and Mermaid canvas extension for Pi Coding Agent",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist",
-    "skills",
-    "assets",
+    "dist/",
+    "skills/",
+    "assets/",
     "README.md",
     "LICENSE"
   ],
@@ -32,6 +32,7 @@
     "node": ">=18.0.0"
   },
   "pi": {
+    "image": "https://raw.githubusercontent.com/lleontor705/pi-canvas/main/assets/banner.png",
     "extensions": [
       "./dist/index.js"
     ],
@@ -43,7 +44,11 @@
     "build": "tsc",
     "prepublishOnly": "npm run build"
   },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
   }

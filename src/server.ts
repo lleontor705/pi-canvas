@@ -2,26 +2,68 @@ import * as http from 'node:http';
 import { exec } from 'node:child_process';
 import type { CanvasItem } from './types.js';
 
+export const ALLOWED_CANVAS_TYPES = ['html', 'svg', 'mermaid', 'markdown', 'diff'] as const;
+export type CanvasItemType = (typeof ALLOWED_CANVAS_TYPES)[number];
+
+export interface CanvasServerOptions {
+  port?: number;
+  maxPortAttempts?: number;
+  idleTimeoutMs?: number;
+}
+
 export class CanvasServer {
   private server: http.Server | null = null;
   private port: number = 4321;
+  private readonly maxPortAttempts: number = 20;
+  private readonly idleTimeoutMs: number = 30 * 60 * 1000;
+  private idleTimer: NodeJS.Timeout | null = null;
   private items: CanvasItem[] = [];
   private clients: Set<http.ServerResponse> = new Set();
 
-  constructor(port = 4321) {
-    this.port = port;
+  constructor(optionsOrPort: number | CanvasServerOptions = 4321) {
+    if (typeof optionsOrPort === 'number') {
+      this.port = optionsOrPort;
+    } else {
+      this.port = optionsOrPort.port ?? 4321;
+      this.maxPortAttempts = optionsOrPort.maxPortAttempts ?? 20;
+      this.idleTimeoutMs = optionsOrPort.idleTimeoutMs ?? 30 * 60 * 1000;
+    }
+  }
+
+  public validateItem(item: unknown): asserts item is Omit<CanvasItem, 'id' | 'timestamp'> {
+    if (!item || typeof item !== 'object') {
+      throw new Error('Canvas item must be a valid non-null object');
+    }
+    const candidate = item as Record<string, unknown>;
+    if (typeof candidate.content !== 'string' || candidate.content.trim().length === 0) {
+      throw new Error('Canvas item content must be a non-empty string');
+    }
+    if (candidate.type !== undefined && !ALLOWED_CANVAS_TYPES.includes(candidate.type as CanvasItemType)) {
+      throw new Error(
+        `Invalid canvas item type "${candidate.type}". Must be one of: ${ALLOWED_CANVAS_TYPES.join(', ')}`
+      );
+    }
+    if (candidate.title !== undefined && typeof candidate.title !== 'string') {
+      throw new Error('Canvas item title must be a string');
+    }
   }
 
   public addItem(item: Omit<CanvasItem, 'id' | 'timestamp'>): CanvasItem {
+    this.validateItem(item);
+    const validTitle = typeof item.title === 'string' && item.title.trim() ? item.title.trim() : 'Untitled Artifact';
+    const validType: CanvasItemType = (item.type as CanvasItemType) || 'html';
     const newItem: CanvasItem = {
-      ...item,
       id: 'canvas_' + Math.random().toString(36).substring(2, 9),
+      title: validTitle,
+      type: validType,
+      content: item.content,
       timestamp: Date.now(),
     };
     this.items.unshift(newItem);
     if (this.items.length > 50) {
       this.items.pop();
     }
+    this.resetIdleTimer();
     this.broadcast({ type: 'item_added', item: newItem });
     return newItem;
   }
@@ -32,11 +74,18 @@ export class CanvasServer {
 
   public clear(): void {
     this.items = [];
+    this.resetIdleTimer();
     this.broadcast({ type: 'cleared' });
   }
 
-  private broadcast(data: any): void {
-    const payload = `data: ${JSON.stringify(data)}\n\n`;
+  private broadcast(data: unknown): void {
+    let payload: string;
+    try {
+      payload = `data: ${JSON.stringify(data)}\n\n`;
+    } catch (err) {
+      console.error('Failed to serialize broadcast payload:', err);
+      return;
+    }
     for (const client of this.clients) {
       try {
         client.write(payload);
@@ -46,66 +95,105 @@ export class CanvasServer {
     }
   }
 
+  private resetIdleTimer(): void {
+    this.clearIdleTimer();
+    if (this.idleTimeoutMs > 0 && this.server) {
+      this.idleTimer = setTimeout(() => {
+        void this.handleIdleTimeout();
+      }, this.idleTimeoutMs);
+      this.idleTimer.unref?.();
+    }
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  private async handleIdleTimeout(): Promise<void> {
+    if (this.isRunning()) {
+      await this.stop();
+    }
+  }
+
   public start(): Promise<string> {
     return new Promise((resolve, reject) => {
       if (this.server) {
+        this.resetIdleTimer();
         resolve(`http://127.0.0.1:${this.port}`);
         return;
       }
 
-      this.server = http.createServer((req, res) => {
-        const url = new URL(req.url || '/', `http://${req.headers.host}`);
+      let currentPort = this.port;
+      let attempts = 0;
 
-        // Security: only allow local loopback
-        const remoteIp = req.socket.remoteAddress;
-        if (remoteIp !== '127.0.0.1' && remoteIp !== '::1' && remoteIp !== '::ffff:127.0.0.1') {
-          res.writeHead(403, { 'Content-Type': 'text/plain' });
-          res.end('Forbidden: Pi Canvas only accepts loopback connections.');
-          return;
-        }
+      const tryListen = () => {
+        const srv = http.createServer((req, res) => {
+          this.resetIdleTimer();
+          const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
-        if (url.pathname === '/events') {
-          // SSE stream for live updates
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'Access-Control-Allow-Origin': '*',
-          });
-          res.write(`data: ${JSON.stringify({ type: 'init', items: this.items })}\n\n`);
-          this.clients.add(res);
+          // Security: only allow local loopback
+          const remoteIp = req.socket.remoteAddress;
+          if (remoteIp !== '127.0.0.1' && remoteIp !== '::1' && remoteIp !== '::ffff:127.0.0.1') {
+            res.writeHead(403, { 'Content-Type': 'text/plain' });
+            res.end('Forbidden: Pi Canvas only accepts loopback connections.');
+            return;
+          }
 
-          req.on('close', () => {
-            this.clients.delete(res);
-          });
-          return;
-        }
+          if (url.pathname === '/events') {
+            // SSE stream for live updates
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              Connection: 'keep-alive',
+              'Access-Control-Allow-Origin': '*',
+            });
+            res.write(`data: ${JSON.stringify({ type: 'init', items: this.items })}\n\n`);
+            this.clients.add(res);
 
-        if (url.pathname === '/api/items') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(this.items));
-          return;
-        }
+            req.on('close', () => {
+              this.clients.delete(res);
+              this.resetIdleTimer();
+            });
+            return;
+          }
 
-        // HTML Web Application
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(this.renderHtml());
-      });
+          if (url.pathname === '/api/items') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(this.items));
+            return;
+          }
 
-      this.server.listen(this.port, '127.0.0.1', () => {
-        resolve(`http://127.0.0.1:${this.port}`);
-      });
+          // HTML Web Application
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(this.renderHtml());
+        });
 
-      this.server.on('error', (err: any) => {
-        if (err.code === 'EADDRINUSE') {
-          this.port += 1;
-          this.server?.close();
-          this.server = null;
-          this.start().then(resolve).catch(reject);
-        } else {
-          reject(err);
-        }
-      });
+        srv.once('error', (err: NodeJS.ErrnoException) => {
+          srv.close();
+          if (err.code === 'EADDRINUSE' && attempts < this.maxPortAttempts) {
+            attempts++;
+            currentPort++;
+            tryListen();
+          } else {
+            this.server = null;
+            this.clearIdleTimer();
+            reject(err);
+          }
+        });
+
+        srv.listen(currentPort, '127.0.0.1', () => {
+          this.server = srv;
+          const addr = srv.address();
+          this.port = typeof addr === 'object' && addr !== null ? addr.port : currentPort;
+          this.resetIdleTimer();
+          resolve(`http://127.0.0.1:${this.port}`);
+        });
+      };
+
+      tryListen();
     });
   }
 
@@ -122,6 +210,7 @@ export class CanvasServer {
 
   public stop(): Promise<void> {
     return new Promise((resolve) => {
+      this.clearIdleTimer();
       for (const client of this.clients) {
         try {
           client.end();
@@ -145,6 +234,10 @@ export class CanvasServer {
 
   public getUrl(): string {
     return `http://127.0.0.1:${this.port}`;
+  }
+
+  public getPort(): number {
+    return this.port;
   }
 
   private renderHtml(): string {
@@ -216,6 +309,8 @@ export class CanvasServer {
   <script>
     let items = [];
     let activeId = null;
+    let evtSource = null;
+    let reconnectTimer = null;
 
     function selectItem(id) {
       activeId = id;
@@ -290,24 +385,58 @@ export class CanvasServer {
       updateList();
     }
 
-    // Connect SSE
-    const evtSource = new EventSource('/events');
-    evtSource.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-      if (data.type === 'init') {
-        items = data.items || [];
-        if (items.length > 0 && !activeId) activeId = items[0].id;
-        renderActive();
-        updateList();
-      } else if (data.type === 'item_added') {
-        items.unshift(data.item);
-        activeId = data.item.id;
-        renderActive();
-        updateList();
-      } else if (data.type === 'cleared') {
-        clearItems();
+    // Connect SSE with auto-reconnect (exponential backoff, capped)
+    let reconnectDelay = 1000;
+    const MAX_RECONNECT_DELAY = 30000;
+    function connectSSE() {
+      if (evtSource) {
+        evtSource.close();
       }
-    };
+      const statusBadge = document.getElementById('status-badge');
+      evtSource = new EventSource('/events');
+
+      evtSource.onopen = () => {
+        reconnectDelay = 1000;
+        if (statusBadge) {
+          statusBadge.className = 'px-2.5 py-1 text-xs rounded-full bg-emerald-900/60 text-emerald-400 border border-emerald-700 flex items-center gap-1.5';
+          statusBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>Live Connected';
+        }
+      };
+
+      evtSource.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.type === 'init') {
+            items = data.items || [];
+            if (items.length > 0 && !activeId) activeId = items[0].id;
+            renderActive();
+            updateList();
+          } else if (data.type === 'item_added') {
+            items.unshift(data.item);
+            activeId = data.item.id;
+            renderActive();
+            updateList();
+          } else if (data.type === 'cleared') {
+            clearItems();
+          }
+        } catch (err) {
+          console.error('Failed to parse SSE payload:', err);
+        }
+      };
+
+      evtSource.onerror = () => {
+        if (statusBadge) {
+          statusBadge.className = 'px-2.5 py-1 text-xs rounded-full bg-amber-900/60 text-amber-400 border border-amber-700 flex items-center gap-1.5';
+          statusBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-amber-400"></span>Reconnecting...';
+        }
+        evtSource.close();
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connectSSE, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+      };
+    }
+
+    connectSSE();
   </script>
 </body>
 </html>`;
